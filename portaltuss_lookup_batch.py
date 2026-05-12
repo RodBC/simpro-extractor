@@ -2,11 +2,11 @@
 """
 Consulta em lote no Portal TUSS (POST /tuss/Pesquisar).
 
-Lê `data/left_out_tuss_values.csv` (ou `--input`) e grava um relatório com
-campos extraídos do primeiro resultado (e metadados de erro / total).
+Lê `left_out_tuss_values.csv` no diretório do projeto (ou `--input`) e grava
+um relatório com campos extraídos do primeiro resultado (e metadados de erro / total).
 
-  venv/bin/python scripts/portaltuss_lookup_batch.py --dry-run --limit 3
-  venv/bin/python scripts/portaltuss_lookup_batch.py --resume --sleep 1.0
+  venv/bin/python portaltuss_lookup_batch.py --dry-run --limit 3
+  venv/bin/python portaltuss_lookup_batch.py --resume --sleep 1.0
 
 `--resume`: reabre `--out` e ignora códigos já presentes (retoma após falha).
 
@@ -21,7 +21,10 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# Project root: directory that contains `lib/`, whether this file lives at repo
+# root or under `scripts/`.
+_here = Path(__file__).resolve().parent
+ROOT = _here if (_here / "lib").is_dir() else _here.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -110,9 +113,9 @@ def row_from_result(codigo: str, r) -> dict[str, object]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--input", type=Path, default=ROOT / "data" / "left_out_tuss_values.csv")
+    ap.add_argument("--input", type=Path, default=ROOT / "left_out_tuss_values.csv")
     ap.add_argument("--col", type=str, default="tuss_all_codes")
-    ap.add_argument("--out", type=Path, default=ROOT / "data" / "left_out_portaltuss_report.csv")
+    ap.add_argument("--out", type=Path, default=ROOT / "left_out_portaltuss_report.csv")
     ap.add_argument("--limit", type=int, default=0, help="0 = todos")
     ap.add_argument("--sleep", type=float, default=1.0, help="pausa base entre pedidos (s)")
     ap.add_argument("--jitter", type=float, default=0.15, help="±aleatório em s (0=desliga)")
