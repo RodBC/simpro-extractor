@@ -8,6 +8,7 @@ Uso responsável: limitar taxa de pedidos; respeitar os Termos de Uso do portal.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import time
@@ -15,6 +16,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+import httpx
 
 
 DEFAULT_BASE = "https://portaltuss.com.br"
@@ -58,6 +61,70 @@ def _flatten_first_hit(hit: dict[str, Any]) -> dict[str, str]:
         "state": str(hit.get("state") or ""),
         "categoria_key": str(cat.get("key") or "") if isinstance(cat, dict) else "",
     }
+
+
+def parse_pesquisar_body(http_status: int, raw_txt: str) -> PortalTussSearchResult:
+    """Parse JSON from a successful HTTP response body (2xx with text)."""
+    try:
+        raw: dict[str, Any] = json.loads(raw_txt)
+    except json.JSONDecodeError:
+        return PortalTussSearchResult(
+            ok=False,
+            http_status=http_status,
+            total=0,
+            first_codigo=None,
+            first_descricao=None,
+            first_vigencia=None,
+            first_categoria=None,
+            raw=None,
+            error="Resposta não é JSON",
+        )
+
+    if raw.get("message") and raw.get("detail") is None and "pagina" not in raw:
+        return PortalTussSearchResult(
+            ok=False,
+            http_status=http_status,
+            total=0,
+            first_codigo=None,
+            first_descricao=None,
+            first_vigencia=None,
+            first_categoria=None,
+            raw=raw,
+            error=str(raw.get("message", ""))[:500],
+        )
+
+    pagina = raw.get("pagina") or {}
+    total = int(pagina.get("total") or 0)
+    rows = pagina.get("result") or []
+    if not rows:
+        return PortalTussSearchResult(
+            ok=True,
+            http_status=http_status,
+            total=0,
+            first_codigo=None,
+            first_descricao=None,
+            first_vigencia=None,
+            first_categoria=None,
+            raw=raw,
+        )
+
+    hit = rows[0]
+    if not isinstance(hit, dict):
+        hit = {}
+    cat = hit.get("categoriaValue") or {}
+    categoria = str(cat.get("text") or "") if isinstance(cat, dict) else ""
+    extras = _flatten_first_hit(hit)
+    return PortalTussSearchResult(
+        ok=True,
+        http_status=http_status,
+        total=total,
+        first_codigo=str(hit.get("codigoTUSS") or "") or None,
+        first_descricao=str(hit.get("descricao") or "") or None,
+        first_vigencia=str(hit.get("vigencia") or "") or None,
+        first_categoria=categoria or None,
+        raw=raw,
+        extras=extras,
+    )
 
 
 class PortalTussClient:
@@ -120,66 +187,7 @@ class PortalTussClient:
                 error=str(e.reason),
             )
 
-        try:
-            raw: dict[str, Any] = json.loads(raw_txt)
-        except json.JSONDecodeError:
-            return PortalTussSearchResult(
-                ok=False,
-                http_status=status,
-                total=0,
-                first_codigo=None,
-                first_descricao=None,
-                first_vigencia=None,
-                first_categoria=None,
-                raw=None,
-                error="Resposta não é JSON",
-            )
-
-        if raw.get("message") and raw.get("detail") is None and "pagina" not in raw:
-            return PortalTussSearchResult(
-                ok=False,
-                http_status=status,
-                total=0,
-                first_codigo=None,
-                first_descricao=None,
-                first_vigencia=None,
-                first_categoria=None,
-                raw=raw,
-                error=str(raw.get("message", ""))[:500],
-            )
-
-        pagina = raw.get("pagina") or {}
-        total = int(pagina.get("total") or 0)
-        rows = pagina.get("result") or []
-        if not rows:
-            return PortalTussSearchResult(
-                ok=True,
-                http_status=status,
-                total=0,
-                first_codigo=None,
-                first_descricao=None,
-                first_vigencia=None,
-                first_categoria=None,
-                raw=raw,
-            )
-
-        hit = rows[0]
-        if not isinstance(hit, dict):
-            hit = {}
-        cat = hit.get("categoriaValue") or {}
-        categoria = str(cat.get("text") or "") if isinstance(cat, dict) else ""
-        extras = _flatten_first_hit(hit)
-        return PortalTussSearchResult(
-            ok=True,
-            http_status=status,
-            total=total,
-            first_codigo=str(hit.get("codigoTUSS") or "") or None,
-            first_descricao=str(hit.get("descricao") or "") or None,
-            first_vigencia=str(hit.get("vigencia") or "") or None,
-            first_categoria=categoria or None,
-            raw=raw,
-            extras=extras,
-        )
+        return parse_pesquisar_body(status, raw_txt)
 
     def pesquisar_com_retry(
         self,
@@ -217,3 +225,93 @@ class PortalTussClient:
         if delay_s > 0:
             time.sleep(delay_s)
         return self.pesquisar_com_retry(codigo.strip(), max_tentativas=max_tentativas)
+
+    async def pesquisar_async(
+        self,
+        client: httpx.AsyncClient,
+        termo: str,
+        categorias: list[Any] | None = None,
+    ) -> PortalTussSearchResult:
+        categorias = categorias if categorias is not None else []
+        body = json.dumps({"termo": termo, "categorias": categorias}, ensure_ascii=False).encode("utf-8")
+        url = f"{self.base_url}{PESQUISAR_PATH}"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": self.base_url,
+            "Referer": f"{self.base_url}/",
+            "User-Agent": self.user_agent,
+        }
+        try:
+            resp = await client.post(url, content=body, headers=headers)
+        except httpx.RequestError as e:
+            return PortalTussSearchResult(
+                ok=False,
+                http_status=None,
+                total=0,
+                first_codigo=None,
+                first_descricao=None,
+                first_vigencia=None,
+                first_categoria=None,
+                raw=None,
+                error=str(e),
+            )
+        status = resp.status_code
+        raw_txt = resp.text
+        if status >= 400:
+            return PortalTussSearchResult(
+                ok=False,
+                http_status=status,
+                total=0,
+                first_codigo=None,
+                first_descricao=None,
+                first_vigencia=None,
+                first_categoria=None,
+                raw=None,
+                error=f"HTTP {status}",
+            )
+        return parse_pesquisar_body(status, raw_txt)
+
+    async def pesquisar_com_retry_async(
+        self,
+        client: httpx.AsyncClient,
+        termo: str,
+        *,
+        categorias: list[Any] | None = None,
+        max_tentativas: int = 4,
+        backoff_inicial_s: float = 2.0,
+    ) -> PortalTussSearchResult:
+        ultimo: PortalTussSearchResult | None = None
+        for tentativa in range(max_tentativas):
+            r = await self.pesquisar_async(client, termo, categorias)
+            if r.ok and r.error is None:
+                return r
+            if r.http_status == 429 or (r.error and "429" in r.error):
+                await asyncio.sleep(backoff_inicial_s * (2**tentativa) + random.uniform(0, 1))
+            elif r.error and ("timed out" in r.error.lower() or "temporariamente" in r.error.lower()):
+                await asyncio.sleep(backoff_inicial_s * (1.5**tentativa))
+            elif tentativa < max_tentativas - 1:
+                await asyncio.sleep(backoff_inicial_s * (1.2**tentativa))
+            ultimo = r
+        return ultimo or PortalTussSearchResult(
+            ok=False,
+            http_status=None,
+            total=0,
+            first_codigo=None,
+            first_descricao=None,
+            first_vigencia=None,
+            first_categoria=None,
+            raw=None,
+            error="retry esgotado",
+        )
+
+    async def pesquisar_codigo_async(
+        self,
+        client: httpx.AsyncClient,
+        codigo: str,
+        *,
+        max_tentativas: int = 4,
+    ) -> PortalTussSearchResult:
+        return await self.pesquisar_com_retry_async(
+            client, codigo.strip(), max_tentativas=max_tentativas
+        )
